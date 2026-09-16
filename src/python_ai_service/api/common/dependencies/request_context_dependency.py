@@ -9,7 +9,7 @@ from python_ai_service.api.common.dependencies.headers_dependency import (
     get_institutional_headers,
 )
 from python_ai_service.api.common.dependencies.security_dependency import require_valid_jwt
-from python_ai_service.api.common.middleware.request_id_middleware import get_current_request_id
+from python_ai_service.config.request_id_context import get_current_request_id
 from python_ai_service.domain.request_context import RequestContext
 
 

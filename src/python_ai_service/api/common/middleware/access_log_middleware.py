@@ -1,15 +1,13 @@
 """Safe HTTP access logging without request/response bodies or credentials."""
 
-import logging
 from time import perf_counter
 
+import structlog
 from fastapi import FastAPI, Request
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
-from python_ai_service.api.common.middleware.request_id_middleware import get_current_request_id
-
-logger = logging.getLogger("http.access")
+logger = structlog.get_logger("http.access")
 
 
 def add_access_log_middleware(application: FastAPI) -> None:
@@ -21,12 +19,12 @@ def add_access_log_middleware(application: FastAPI) -> None:
         started = perf_counter()
         response = await call_next(request)
         duration_ms = round((perf_counter() - started) * 1000, 2)
+        # request_id is injected by the structlog processor chain.
         logger.info(
-            "request_completed method=%s path=%s status=%s duration_ms=%s request_id=%s",
-            request.method,
-            request.url.path,
-            response.status_code,
-            duration_ms,
-            get_current_request_id(),
+            "request_completed",
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            duration_ms=duration_ms,
         )
         return response

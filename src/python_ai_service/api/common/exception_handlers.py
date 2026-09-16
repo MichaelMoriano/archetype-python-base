@@ -3,7 +3,7 @@
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from python_ai_service.api.common.middleware.request_id_middleware import get_current_request_id
+from python_ai_service.config.request_id_context import get_current_request_id
 from python_ai_service.domain.exceptions import (
     AuthenticationException,
     AuthorizationException,
