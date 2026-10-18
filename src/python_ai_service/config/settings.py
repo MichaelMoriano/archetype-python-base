@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # External infrastructure locations/credentials are intentionally required.
     gen_security_base_url: AnyHttpUrl
     gen_security_validate_token_path: str = "/internal/validateToken"
+    gen_security_basic_auth_path: str = Field(default="/internal/validateBasicAuth", min_length=1)
     gen_security_use_basic_auth: bool = False
     gen_security_username: str | None = None
     gen_security_password: SecretStr | None = None
@@ -43,6 +44,12 @@ class Settings(BaseSettings):
     def gen_security_validate_url(self) -> str:
         base = str(self.gen_security_base_url).rstrip("/")
         path = self.gen_security_validate_token_path.lstrip("/")
+        return f"{base}/{path}"
+
+    @property
+    def gen_security_basic_auth_url(self) -> str:
+        base = str(self.gen_security_base_url).rstrip("/")
+        path = self.gen_security_basic_auth_path.lstrip("/")
         return f"{base}/{path}"
 
     @model_validator(mode="after")

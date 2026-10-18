@@ -9,7 +9,19 @@ class SecurityValidationPort(Protocol):
         *,
         origin_id: int,
         sub_origin_id: int,
+        request_id: str,
         token: str,
     ) -> None:
-        """Validate the caller JWT or raise a controlled exception."""
+        """Validate the raw caller token (without Bearer) or raise a controlled exception."""
+        ...
+
+    async def validate_basic_auth(
+        self,
+        *,
+        origin_id: int,
+        sub_origin_id: int,
+        request_id: str,
+        encoded_basic_auth: str,
+    ) -> None:
+        """Validate a complete Basic Authorization value or raise a controlled exception."""
         ...

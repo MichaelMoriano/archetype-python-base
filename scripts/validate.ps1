@@ -17,7 +17,7 @@ uv run mypy
 if ($LASTEXITCODE -ne 0) { throw "mypy failed." }
 
 Write-Host "`n=== Pytest + coverage ==="
-uv run pytest --cov --cov-report=term-missing
+uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml
 if ($LASTEXITCODE -ne 0) { throw "pytest failed." }
 
 Write-Host "`nAll validations completed successfully."

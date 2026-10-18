@@ -14,10 +14,13 @@ from tests.settings_helpers import build_test_settings
 class FakeSecurityPort:
     calls: int = 0
 
-    async def validate_jwt(self, *, origin_id: int, sub_origin_id: int, token: str) -> None:
+    async def validate_jwt(
+        self, *, origin_id: int, sub_origin_id: int, request_id: str, token: str
+    ) -> None:
         assert origin_id == 26
         assert sub_origin_id == 105
         assert token == "token"
+        assert request_id == "req-1"
         self.calls += 1
 
 

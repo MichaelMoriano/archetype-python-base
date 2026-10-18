@@ -20,7 +20,7 @@ async def test_valid_return_code_allows_request() -> None:
     )
     async with httpx.AsyncClient(transport=transport) as client:
         adapter = GenSecurityAdapter(client=client, settings=_settings())
-        await adapter.validate_jwt(origin_id=26, sub_origin_id=105, token="abc")
+        await adapter.validate_jwt(origin_id=26, sub_origin_id=105, request_id="test", token="abc")
 
 
 @pytest.mark.asyncio
@@ -34,7 +34,9 @@ async def test_invalid_token_code_is_authentication_error() -> None:
     async with httpx.AsyncClient(transport=transport) as client:
         adapter = GenSecurityAdapter(client=client, settings=_settings())
         with pytest.raises(AuthenticationException):
-            await adapter.validate_jwt(origin_id=26, sub_origin_id=105, token="abc")
+            await adapter.validate_jwt(
+                origin_id=26, sub_origin_id=105, request_id="test", token="abc"
+            )
 
 
 @pytest.mark.asyncio
@@ -48,4 +50,6 @@ async def test_unknown_contract_code_is_external_error() -> None:
     async with httpx.AsyncClient(transport=transport) as client:
         adapter = GenSecurityAdapter(client=client, settings=_settings())
         with pytest.raises(ExternalServiceException):
-            await adapter.validate_jwt(origin_id=26, sub_origin_id=105, token="abc")
+            await adapter.validate_jwt(
+                origin_id=26, sub_origin_id=105, request_id="test", token="abc"
+            )
