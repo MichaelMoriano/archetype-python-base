@@ -56,170 +56,91 @@ Usa HTTPS fuera del entorno local: Base64 no cifra las credenciales.
 
 No se crea una carpeta `v2` vacía. Se añade cuando realmente nace un contrato V2 incompatible; V1 puede convivir durante la migración.
 
-## Análisis con SonarQube
+## Validación, vulnerabilidades y SonarQube
 
-`pysonar` es una dependencia de desarrollo; la imagen de producción utiliza
-`uv sync --frozen --no-dev` y no la instala. El análisis utiliza el proyecto
-`Archetype-Python-Base`, definido en `sonar-project.properties`.
-
-Desde la raíz del repositorio, instala las dependencias y ejecuta las validaciones:
+Ejecuta los comandos desde la raíz del repositorio, con Python 3.13 y uv.
+Instala las dependencias de desarrollo:
 
 ```powershell
 uv sync --locked
-.\scripts\validate.ps1
 ```
 
-Continúa solo si las validaciones finalizaron correctamente. El script genera
-`coverage.xml` con rutas relativas para que SonarQube importe la cobertura.
-Ejecuta el script; solicita el token sin escribirlo en el historial:
+### Configuración
 
-```powershell
-.\scripts\sonar.ps1
-```
-
-El token debe tener permiso de análisis para ese proyecto. No lo guardes en Git
-ni en `sonar-project.properties`. La primera ejecución del scanner puede descargar
-componentes adicionales y requiere conectividad. Un error del scanner, un timeout
-o un Quality Gate fallido producen una ejecución fallida; revisa el mensaje y el
-panel del proyecto para distinguir la causa.
-
-Cuando el gate falla, el script consulta las condiciones del análisis recién
-enviado y muestra el valor obtenido y el umbral, por ejemplo:
-`Coverage: 89.25%; required >= 90%`. Distingue cobertura global y de código nuevo,
-y muestra también otras condiciones fallidas sin atribuirlas a cobertura.
-Las cifras proceden de SonarQube, no de una estimación del reporte local.
-Si el token no permite consultar el resultado o el servidor no responde, informa
-que el detalle no está disponible y conserva el fallo. No amplíes permisos sin
-consultar la política del equipo. El diagnóstico no cambia el Quality Gate.
-
-Para comprobar la configuración sin conectar al servidor ni enviar un análisis:
-
-```powershell
-$env:PYTHONUTF8 = "1"
-uv run --locked pysonar --dry-run -Dsonar.host.url=http://localhost:9000
-```
-
-`PYTHONUTF8` evita errores de codificación en la salida del scanner en Windows.
-
-El umbral local de cobertura es 90% (líneas y ramas combinadas por coverage.py);
-la validación falla si no se alcanza. El Quality Gate corporativo se administra
-en SonarQube y evalúa sus propias métricas globales y de código nuevo.
-No se añaden exclusiones para forzar su aprobación.
-
-## Flujo obligatorio de validación y seguridad
-
-Desde la raíz del repositorio, el comando multiplataforma es:
-
-```powershell
-uv run --locked python scripts/check.py
-```
-
-Ejecuta **lockfile → Ruff → mypy → pruebas/cobertura → auditoría de dependencias
-→ SonarQube** y se detiene ante el primer fallo. No construye, publica ni despliega
-imágenes. `validate.ps1` conserva su propósito de validación local sin consultas
-de vulnerabilidades; `sonar.ps1` permite ejecutar Sonar de forma independiente.
-Ninguno de esos comandos aislados sustituye el flujo obligatorio.
-
-Antes del paso Sonar deben existir `SONAR_HOST_URL` y `SONAR_TOKEN` en el entorno.
-Para la ejecución local puedes usar un prompt seguro y limpiar el token al terminar:
-
-```powershell
-$env:SONAR_HOST_URL = "http://localhost:9000"
-$token = Read-Host "SonarQube analysis token" -AsSecureString
-try {
-    $env:SONAR_TOKEN = [System.Net.NetworkCredential]::new("", $token).Password
-    uv run --locked python scripts/check.py
-    if ($LASTEXITCODE -ne 0) { throw "Required checks failed; do not publish or promote." }
-} finally {
-    Remove-Item Env:SONAR_TOKEN -ErrorAction SilentlyContinue
-    $token.Dispose()
-}
-```
-
-### Auditoría de dependencias Python
-
-`pip-audit` y `packaging` son dependencias de desarrollo, no de producción.
-Para ejecutar solo la auditoría:
-
-```powershell
-uv run --locked python scripts/audit_dependencies.py
-```
-
-El script exporta `uv.lock` con versiones exactas, dependencias transitivas y todos
-los grupos (incluido desarrollo), sin incluir el propio proyecto. El exportado es
-temporal: no se mantiene otro lockfile. Evalúa los marcadores de Python/plataforma
-del entorno donde corre; para el despliegue Linux se debe ejecutar en ese entorno,
-no tomar un resultado Windows como equivalente.
-
-`pip-audit` consulta avisos de PyPI. Se desactiva su resolución/instalación mediante
-`--no-deps --disable-pip`; los hashes se omiten únicamente en el inventario de
-auditoría, que no instala paquetes. Se verifica que los nombres/versiones auditados
-coincidan con el exportado y se rechazan dependencias omitidas, locales o sin pin.
-La instalación del proyecto sigue usando `uv.lock` sin cambios.
-
-La capa de política consulta NVD API 2.0 usando los alias CVE de cada aviso:
-
-| Evidencia | Resultado |
+| Variable de entorno | Uso |
 |---|---|
-| Mayor puntuación base CVSS v3.0/v3.1/v4.0 publicada por NVD >= 7.0 | Bloqueado (HIGH/CRITICAL), salida 1. |
-| Todas las puntuaciones verificadas < 7.0, o sin avisos | Aprobado, salida 0. |
-| Sin alias CVE, sin CVSS v3/v4, CVE rechazado, paquete omitido, fallo de consulta o reporte inconsistente | Verificación incompleta, salida 2; bloquea igualmente. |
+| `SONAR_HOST_URL` | URL accesible de SonarQube; localmente, `http://localhost:9000`. |
+| `SONAR_TOKEN` | Token con permiso de análisis sobre `Archetype-Python-Base`. |
+| `NVD_API_KEY` | Opcional y recomendable para consultar CVSS con menos restricciones de frecuencia. |
 
-Se toma el máximo entre fuentes/versiones/alias, no una media ni una estimación
-de la severidad basada en la descripción. Un resultado incompleto no se clasifica
-como HIGH: simplemente no autoriza continuar. Este criterio es explícito y no
-promete cifras idénticas a otro scanner que seleccione fuentes distintas.
-No hay excepciones ni correcciones automáticas implementadas. Los avisos incluyen
-las versiones corregidas que publique PyPI; cualquier actualización requiere uv,
-revisión y nuevas pruebas. Se conserva el reporte de avisos completos, no solo
-los que bloquean.
+`check.py` lee el entorno: no solicita credenciales ni carga `.env` automáticamente.
+No guardes claves en Git ni en `sonar-project.properties`, que define el proyecto,
+las fuentes, las pruebas y la ubicación de `coverage.xml`.
+Se requiere conectividad a SonarQube, PyPI y NVD; el scanner puede descargar
+componentes adicionales en su primera ejecución.
 
-Reportes generados (ignorados por Git bajo `build/`):
+### Flujo completo
 
-- `build/security/pip-audit.json`: inventario y avisos, o estado incompleto.
-- `build/security/dependency-audit.json`: decisión, puntuaciones CVSS y hallazgos.
+Con las variables configuradas, ejecuta:
 
-Puedes cambiar el directorio mediante `--report-dir <ruta>`. Cada ejecución
-invalida el PASS anterior antes de consultar servicios. No se imprimen respuestas
-HTTP de error, claves ni salidas de subprocesos potencialmente sensibles.
+```powershell
+uv run --locked --env-file .env python  scripts/check.py
+```
 
-Si NVD falla, la consola identifica el CVE y la categoría: HTTP, timeout, red/TLS,
-JSON inválido, esquema incompatible o puntuación ausente. El reporte agrega
-`error_context` con esos datos, el estado HTTP cuando existe y una ruta de campos
-saneada para errores de esquema. No se incluyen cuerpos HTTP ni valores recibidos.
-Las métricas adicionales de NVD, como SSVC, no se interpretan como CVSS; las
-puntuaciones CVSS soportadas siguen validándose estrictamente.
+El orden es **lockfile → Ruff lint/formato → mypy → pruebas y cobertura mínima
+del 90% → auditoría de dependencias → Sonar y su Quality Gate**.
+Cualquier fallo detiene los pasos posteriores. El comando no construye, publica
+ni despliega imágenes.
 
-Configura `NVD_API_KEY` como secreto del entorno/CI si está disponible. No se lee
-desde `.env` ni se acepta como argumento. Sin clave, el script espera 6 segundos
-entre CVE nuevos; con clave, 0.6 segundos. Las consultas tienen timeout de 15 segundos
-y no siguen redirects ni hacen reintentos automáticos. Los límites compartidos de
-NVD pueden producir una ejecución incompleta: no se ignoran esos fallos.
+### Ejecuciones individuales
 
-La auditoría requiere acceso saliente a PyPI y NVD: se consultan identificadores
-de paquetes/versiones y CVE, no se envía el código fuente de la aplicación.
-No cubre vulnerabilidades del sistema operativo de la imagen ni acredita la
-ausencia de paquetes maliciosos o vulnerabilidades todavía desconocidas.
+| Comando | Alcance |
+|---|---|
+| `.\scripts\validate.ps1` | Lockfile, Ruff, mypy, pruebas y generación de `coverage.xml`; no audita dependencias ni ejecuta Sonar. |
+| `uv run --locked python scripts/audit_dependencies.py` | Solo auditoría de dependencias y política CVSS. |
+| `.\scripts\sonar.ps1` | Solo Sonar: solicita el token y muestra condiciones fallidas cuando puede consultarlas. Requiere generar primero `coverage.xml`. |
 
-### Integración con Tekton
+Estos comandos no sustituyen al flujo completo. El 90% local corresponde a la
+métrica combinada de líneas y ramas de coverage.py; Sonar evalúa sus propias
+métricas y condiciones. Su Quality Gate y la política CVSS son independientes:
+los JSON de auditoría no se importan automáticamente en Sonar.
 
-El agente necesita Python 3.13, uv y `uv sync --locked`. Proporciona los secretos
-por mecanismos del clúster y ejecuta el comando completo; cualquier salida no cero
-debe fallar el paso. Conserva ambos reportes, incluso al fallar. No uses
-`continueOnError`, `|| true` ni una actualización del manifiesto de Argo CD antes
-de que aprueben todos los controles. El pipeline real de construcción/promoción
-debe conectarse a este resultado; este repositorio no modifica el clúster.
+### Política de vulnerabilidades
 
-Sonar no recibe automáticamente estos JSON. Su Quality Gate y la política CVSS
-son controles independientes: ambos deben aprobar. Las pruebas locales de esta
-integración simulan servicios y herramientas; no requieren tokens ni paquetes
-vulnerables reales.
+Se exportan temporalmente las versiones exactas de `uv.lock`, con dependencias
+transitivas y todos los grupos, incluido desarrollo. Se verifica que el inventario
+auditado coincida; no se instala ni actualiza ningún paquete durante el análisis.
+Los marcadores se evalúan para el Python y la plataforma actuales: un resultado
+Windows no sustituye una auditoría Linux.
+
+`pip-audit` obtiene avisos de PyPI y la capa adicional consulta NVD, tomando la
+mayor puntuación base CVSS v3.0/v3.1/v4.0 entre fuentes y alias CVE:
+
+| Salida del auditor | Resultado |
+|---|---|
+| `0` | Sin hallazgos o todos verificados por debajo de 7,0. |
+| `1` | Bloqueado por HIGH/CRITICAL: CVSS >= 7,0. |
+| `2` | Verificación incompleta: falta CVE/CVSS, hay dependencias omitidas o falla una consulta/validación. También detiene el flujo. |
+
+No hay excepciones ni correcciones automáticas. Un hallazgo incluye paquete,
+versión, CVE, CVSS y versiones corregidas disponibles. Un error NVD muestra CVE,
+categoría y estado HTTP cuando existe, sin exponer claves ni cuerpos de respuesta.
+No se audita el sistema operativo de la imagen ni se garantiza detectar paquetes
+maliciosos o vulnerabilidades desconocidas.
+
+### Reportes y revisión
+
+| Archivo | Contenido |
+|---|---|
+| `coverage.xml` | Cobertura de las pruebas, importada por Sonar. |
+| `build/security/pip-audit.json` | Inventario y avisos de dependencias. |
+| `build/security/dependency-audit.json` | Estado `passed`, `blocked` o `incomplete`, puntuaciones y `error_context` si corresponde. |
+
+Los reportes están ignorados por Git. Si falla la auditoría, revisa esos JSON,
+corrige con uv y repite las pruebas y el análisis; no ignores el código de salida.
+Puedes cambiar su directorio con `--report-dir <ruta>` en el auditor.
+Sin `NVD_API_KEY`, las consultas de CVE nuevos se espacian 6 segundos; con clave,
+0,6 segundos. Un fallo de acceso o límite de consultas no se considera aprobación.
 
 Referencias: [pip-audit](https://github.com/pypa/pip-audit),
 [NVD API](https://nvd.nist.gov/developers/vulnerabilities).
-
-En CI, genera el reporte antes del análisis y proporciona `SONAR_HOST_URL` y
-`SONAR_TOKEN` mediante la configuración y los secretos del pipeline. `localhost`
-solo sirve si el servidor está accesible en el mismo entorno del scanner. DevOps
-puede ejecutar SonarScanner CLI en lugar de `pysonar`, reutilizando el mismo
-archivo de propiedades y el reporte. No se configura aquí un pipeline específico.
