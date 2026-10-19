@@ -20,5 +20,6 @@ dist/
 opencode-quota/
 opencode.jsonc
 tui.jsonc
-.atl/
 *.log
+.jbeval/
+/.atl/
