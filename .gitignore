@@ -23,3 +23,4 @@ tui.jsonc
 *.log
 .jbeval/
 /.atl/
+odd/

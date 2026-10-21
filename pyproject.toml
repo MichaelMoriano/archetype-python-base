@@ -20,6 +20,8 @@ module-name = "python_ai_service"
 
 [dependency-groups]
 dev = [
+    "cookiecutter>=2.6,<3",
+    "cvss>=3.6,<4",
     "httpx2>=2.12.0,<3",
     "mypy>=2.3.0,<3",
     "packaging>=26.2",
@@ -64,7 +66,12 @@ warn_unreachable = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_reexport = true
-files = ["src", "scripts", "tests"]
+files = ["src", "scripts", "tests", "tools/archetype_cli/src"]
+mypy_path = "tools/archetype_cli/src"
+
+[[tool.mypy.overrides]]
+module = ["cvss", "cvss.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "9.0"

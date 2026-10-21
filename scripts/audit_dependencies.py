@@ -10,9 +10,11 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
+from cvss import CVSS3, CVSS4
+from cvss.exceptions import CVSSError
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
@@ -20,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 ROOT = Path(__file__).resolve().parents[1]
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+OSV_URL = "https://api.osv.dev/v1/vulns/"
 THRESHOLD = 7.0
 CVSS_METRICS = ("cvssMetricV31", "cvssMetricV30", "cvssMetricV40")
 
@@ -77,6 +80,159 @@ class Dependency(BaseModel):
 class AuditReport(BaseModel):
     model_config = ConfigDict(strict=True)
     dependencies: list[Dependency] = Field(min_length=1)
+
+
+class OsvLookupError(AuditError):
+    """Controlled OSV diagnostics, without response content or request credentials."""
+
+    def __init__(self, advisory_id: str, category: str, http_status: int | None = None) -> None:
+        self.details: dict[str, str | int] = {
+            "source": "OSV",
+            "advisory_id": advisory_id,
+            "category": category,
+        }
+        if http_status is not None:
+            self.details["http_status"] = http_status
+        super().__init__(f"OSV lookup incomplete ({category}); no score was accepted.")
+
+
+class OsvSeverity(BaseModel):
+    model_config = ConfigDict(strict=True)
+    type: str
+    score: str = Field(max_length=512)
+
+
+class OsvPackage(BaseModel):
+    model_config = ConfigDict(strict=True)
+    name: str
+    ecosystem: str
+
+
+class OsvRange(BaseModel):
+    model_config = ConfigDict(strict=True)
+    type: Literal["ECOSYSTEM", "SEMVER", "GIT"]
+    events: list[dict[str, str]] = Field(min_length=1)
+
+
+class OsvAffected(BaseModel):
+    model_config = ConfigDict(strict=True)
+    package: OsvPackage
+    versions: list[str] = Field(default_factory=list)
+    ranges: list[OsvRange] = Field(default_factory=list)
+    severity: list[OsvSeverity] = Field(default_factory=list)
+
+
+class OsvAdvisory(BaseModel):
+    model_config = ConfigDict(strict=True)
+    id: str
+    aliases: list[str] = Field(default_factory=list)
+    withdrawn: str | None = None
+    affected: list[OsvAffected]
+    severity: list[OsvSeverity] = Field(default_factory=list)
+
+
+def osv_affects(affected: OsvAffected, installed: Version) -> bool:
+    # Validate every relevant interval before trusting either ranges or version lists.
+    versions = [Version(value) for value in affected.versions]
+    matches = installed in versions
+    for interval in affected.ranges:
+        if interval.type != "ECOSYSTEM":
+            continue
+        opened = False
+        start: Version | None = None
+        for event in interval.events:
+            if len(event) != 1:
+                raise ValueError("Invalid OSV range event")
+            kind, value = next(iter(event.items()))
+            if kind == "introduced" and not opened:
+                opened = True
+                start = None if value == "0" else Version(value)
+            elif kind in ("fixed", "limit", "last_affected") and opened:
+                end = Version(value)
+                if start is not None and end < start:
+                    raise ValueError("Inverted OSV range")
+                if (start is None or installed >= start) and (
+                    installed <= end if kind == "last_affected" else installed < end
+                ):
+                    matches = True
+                opened = False
+            else:
+                raise ValueError("Unsupported OSV range event")
+        if opened and (start is None or installed >= start):
+            matches = True
+    return matches
+
+
+def osv_vector_score(severity: OsvSeverity) -> dict[str, Any] | None:
+    if severity.type == "CVSS_V3" and severity.score.startswith(("CVSS:3.0/", "CVSS:3.1/")):
+        calculator: Any = CVSS3
+        keys = {"AV", "AC", "PR", "UI", "S", "C", "I", "A"}
+    elif severity.type == "CVSS_V4" and severity.score.startswith("CVSS:4.0/"):
+        calculator = CVSS4
+        keys = {"AV", "AC", "AT", "PR", "UI", "VC", "VI", "VA", "SC", "SI", "SA"}
+    elif severity.type not in ("CVSS_V3", "CVSS_V4"):
+        return None
+    else:
+        raise ValueError("CVSS type and vector disagree")
+    parts = severity.score.split("/")
+    metric_keys = [part.split(":", 1)[0] for part in parts[1:]]
+    if len(set(metric_keys)) != len(metric_keys):
+        raise ValueError("Duplicate CVSS metrics")
+    calculator(severity.score)  # Validate the full vector before extracting base metrics.
+    base_vector = "/".join([parts[0], *(p for p in parts[1:] if p.split(":", 1)[0] in keys)])
+    score = float(calculator(base_vector).base_score)
+    if not 0 <= score <= 10:
+        raise ValueError("Invalid CVSS score")
+    return {"type": severity.type, "vector": base_vector, "cvss": score}
+
+
+def osv_score(client: httpx.Client, advisory_id: str, dependency: Dependency) -> dict[str, Any]:
+    if not re.fullmatch(
+        r"(?:GHSA-[23456789cfghjmpqrvwx]{4}(?:-[23456789cfghjmpqrvwx]{4}){2}|"
+        r"PYSEC-\d{4}-\d+|CVE-\d{4}-\d{4,})",
+        advisory_id,
+    ):
+        raise OsvLookupError("unsupported", "unsupported_id")
+    try:
+        with client.stream("GET", OSV_URL + advisory_id) as response:
+            response.raise_for_status()
+            data = bytearray()
+            for chunk in response.iter_bytes(chunk_size=65_536):
+                data.extend(chunk)
+                if len(data) > 1_048_576:
+                    raise OsvLookupError(advisory_id, "response_too_large")
+        advisory = OsvAdvisory.model_validate_json(data)
+        if advisory.id != advisory_id or advisory.withdrawn is not None:
+            raise OsvLookupError(advisory_id, "record_mismatch_or_withdrawn")
+        if dependency.version is None:
+            raise OsvLookupError(advisory_id, "missing_package_version")
+        matching = [
+            item
+            for item in advisory.affected
+            if item.package.ecosystem == "PyPI"
+            and canonicalize_name(item.package.name) == canonicalize_name(dependency.name)
+            and osv_affects(item, Version(dependency.version))
+        ]
+        if not matching:
+            raise OsvLookupError(advisory_id, "package_or_version_mismatch")
+        severities = [*advisory.severity, *(s for item in matching for s in item.severity)]
+        vectors = [result for s in severities if (result := osv_vector_score(s)) is not None]
+        if not vectors:
+            raise OsvLookupError(advisory_id, "missing_score")
+        return {
+            "source": "OSV",
+            "advisory_id": advisory_id,
+            "cvss": max(item["cvss"] for item in vectors),
+            "vectors": vectors,
+        }
+    except httpx.TimeoutException:
+        raise OsvLookupError(advisory_id, "timeout") from None
+    except httpx.HTTPStatusError as error:
+        raise OsvLookupError(advisory_id, "http_status", error.response.status_code) from None
+    except httpx.RequestError:
+        raise OsvLookupError(advisory_id, "network") from None
+    except (ValueError, CVSSError):
+        raise OsvLookupError(advisory_id, "invalid_response_or_vector") from None
 
 
 class CvssData(BaseModel):
@@ -264,10 +420,28 @@ def nvd_score(client: httpx.Client, cve_id: str) -> float:
 
 
 def assess(
-    dependencies: list[Dependency], client: httpx.Client, delay: float
+    dependencies: list[Dependency],
+    client: httpx.Client,
+    delay: float,
+    osv_client: httpx.Client | None = None,
 ) -> list[dict[str, Any]]:
     findings = []
     cache: dict[str, float] = {}
+    failures: dict[str, NvdLookupError] = {}
+    osv_cache: dict[tuple[str, str, str | None], dict[str, Any] | OsvLookupError] = {}
+
+    def lookup(advisory_id: str, dependency: Dependency) -> dict[str, Any] | OsvLookupError:
+        key = (advisory_id, canonicalize_name(dependency.name), dependency.version)
+        if key not in osv_cache:
+            if osv_cache:
+                time.sleep(0.2)
+            assert osv_client is not None
+            try:
+                osv_cache[key] = osv_score(osv_client, advisory_id, dependency)
+            except OsvLookupError as error:
+                osv_cache[key] = error
+        return osv_cache[key]
+
     for dependency in dependencies:
         for vulnerability in dependency.vulns or []:
             cves = sorted(
@@ -277,29 +451,77 @@ def assess(
                     if re.fullmatch(r"CVE-\d{4}-\d{4,}", value)
                 }
             )
+            errors: list[dict[str, Any]] = []
             if not cves:
-                raise AuditError("A finding has no CVE alias; its CVSS cannot be verified.")
+                errors.append(
+                    {
+                        "category": "missing_cve",
+                        "message": "A finding has no CVE alias; its CVSS cannot be verified.",
+                    }
+                )
             for cve in cves:
-                if cve not in cache:
-                    if cache:
+                if cve not in cache and cve not in failures:
+                    if cache or failures:
                         time.sleep(delay)
-                    cache[cve] = nvd_score(client, cve)
-            score = max(cache[cve] for cve in cves)
+                    try:
+                        cache[cve] = nvd_score(client, cve)
+                    except NvdLookupError as error:
+                        failures[cve] = error
+                if cve in failures:
+                    errors.append({**failures[cve].details, "message": str(failures[cve])})
+            scores = {cve: cache[cve] for cve in cves if cve in cache}
+            evidence: list[dict[str, Any]] = [
+                {"source": "NVD", "advisory_id": cve, "cvss": value}
+                for cve, value in scores.items()
+            ]
+            warnings = []
+            if errors and osv_client is not None:
+                warnings = [{"source": "NVD", **error} for error in errors]
+                candidates = (
+                    [cve for cve in cves if cve in failures]
+                    if cves
+                    else sorted(
+                        set([vulnerability.id, *vulnerability.aliases]),
+                        key=lambda value: (not value.startswith("GHSA-"), value),
+                    )[:8]
+                )
+                for advisory_id in candidates:
+                    fallback = lookup(advisory_id, dependency)
+                    if isinstance(fallback, OsvLookupError):
+                        diagnostic = {**fallback.details, "message": str(fallback)}
+                        errors.append(diagnostic)
+                        warnings.append(diagnostic)
+                    else:
+                        evidence.append(fallback)
+                        if not cves:
+                            errors = []
+                            break
+                        errors = [error for error in errors if error.get("cve_id") != advisory_id]
+            known_max = max((item["cvss"] for item in evidence), default=None)
+            score = known_max if not errors else None
             findings.append(
                 {
                     "package": dependency.name,
                     "version": dependency.version,
                     "id": vulnerability.id,
+                    "aliases": vulnerability.aliases,
                     "cves": cves,
                     "cvss": score,
-                    "cvss_by_cve": {cve: cache[cve] for cve in cves},
-                    "severity": "CRITICAL"
+                    "cvss_by_cve": scores,
+                    "score_evidence": evidence,
+                    "sources": sorted({item["source"] for item in evidence}),
+                    "warnings": warnings,
+                    "severity": "UNVERIFIED"
+                    if score is None
+                    else "CRITICAL"
                     if score >= 9
                     else "HIGH"
                     if score >= 7
                     else "BELOW_HIGH",
                     "fix_versions": vulnerability.fix_versions,
-                    "blocked": score >= THRESHOLD,
+                    "assessment_status": "incomplete" if errors else "complete",
+                    "errors": errors,
+                    "blocked": bool(errors) or (score is not None and score >= THRESHOLD),
                 }
             )
     return findings
@@ -314,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": datetime.now(UTC).isoformat(),
         "status": "incomplete",
         "threshold": THRESHOLD,
-        "source": "NVD CVSS v3/v4 maximum",
+        "source": "NVD CVSS v3/v4 maximum; validated OSV CVSS v3/v4 fallback",
         "scope": "runtime and all dependency groups; current Python/platform markers",
         "findings": [],
     }
@@ -340,16 +562,42 @@ def main(argv: list[str] | None = None) -> int:
         )
         api_key = os.environ.get("NVD_API_KEY")
         headers = {"apiKey": api_key} if api_key else {}
-        with httpx.Client(headers=headers, timeout=15, follow_redirects=False) as client:
-            report["findings"] = assess(dependencies, client, 0.6 if api_key else 6.0)
+        with (
+            httpx.Client(headers=headers, timeout=15, follow_redirects=False) as client,
+            httpx.Client(
+                timeout=15,
+                follow_redirects=False,
+                trust_env=False,
+                headers={"Accept-Encoding": "identity"},
+            ) as osv_client,
+        ):
+            report["findings"] = assess(dependencies, client, 0.6 if api_key else 6.0, osv_client)
         blocked = any(finding["blocked"] for finding in report["findings"])
-        report["status"] = "blocked" if blocked else "passed"
+        incomplete_count = sum(
+            finding["assessment_status"] == "incomplete" for finding in report["findings"]
+        )
+        high_count = sum(
+            any(item["cvss"] >= THRESHOLD for item in finding["score_evidence"])
+            for finding in report["findings"]
+        )
+        report["status"] = "incomplete" if incomplete_count else "blocked" if blocked else "passed"
+        report["summary"] = {
+            "vulnerabilities_found": len(report["findings"]),
+            "high_critical_findings": high_count,
+            "incomplete_assessments": incomplete_count,
+        }
         for finding in report["findings"]:
             # Escape control characters from external identifiers before printing.
             print(json.dumps(finding, ensure_ascii=True))
         print(f"Dependency audit {report['status']}; {len(dependencies)} packages scanned.")
+        print("Dependency audit summary:")
+        print(f"- Vulnerabilities found: {len(report['findings'])}")
+        print(f"- Verified HIGH/CRITICAL findings: {high_count}")
+        print(f"- Findings with incomplete assessment: {incomplete_count}")
+        suffix = " - development checks blocked." if blocked else "."
+        print(f"Result: {report['status'].upper()}{suffix}")
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        return 1 if blocked else 0
+        return 2 if incomplete_count else 1 if blocked else 0
     except (
         AuditError,
         httpx.HTTPError,
