@@ -23,8 +23,9 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 
-from institutional_archetype_cli import __version__
+from institutional_archetype_cli import __version__, messages
 from institutional_archetype_cli.support import (
+    ARCHETYPE_ARCHIVE_NAME,
     CONTEXT,
     GENERATOR_VERSION,
     MAX_ARCHIVE,
@@ -40,6 +41,7 @@ from institutional_archetype_cli.support import (
     json_bytes,
     names,
     nonblank_path,
+    validate_archive_name,
     version,
 )
 
@@ -107,6 +109,7 @@ def nexus_template_path() -> str:
 
 
 def remote_url(base: str, template_version: str) -> str:
+    archive_name = validate_archive_name(ARCHETYPE_ARCHIVE_NAME)
     template_path = nexus_template_path()
     try:
         parsed = urlsplit(base)
@@ -129,7 +132,7 @@ def remote_url(base: str, template_version: str) -> str:
         raise ArchetypeError(
             "Nexus requires HTTPS (HTTP is allowed only on loopback), no URL credentials."
         ) from exc
-    return base.rstrip("/") + f"/{template_path}/{template_version}/archetype.zip"
+    return base.rstrip("/") + f"/{template_path}/{template_version}/{archive_name}"
 
 
 def download(url: str, limit: int, purpose: str = "Template download") -> bytes:
@@ -166,6 +169,7 @@ def download(url: str, limit: int, purpose: str = "Template download") -> bytes:
 
 def published_versions(base: str) -> list[str]:
     """List complete Raw template pairs, never trusting returned download URLs."""
+    archive_name = validate_archive_name(ARCHETYPE_ARCHIVE_NAME)
     template_path = nexus_template_path()
     remote_url(base, "0.0.0")  # Reuse the download origin/security guard.
     parsed = urlsplit(base)
@@ -211,7 +215,10 @@ def published_versions(base: str) -> list[str]:
             if asset.get("repository") != repository:
                 continue
             match = re.fullmatch(
-                re.escape(template_path) + r"/([^/]{1,128})/(archetype\.zip(?:\.sha256)?)",
+                re.escape(template_path)
+                + r"/([^/]{1,128})/("
+                + re.escape(archive_name)
+                + r"(?:\.sha256)?)",
                 asset["path"],
             )
             if match is None:
@@ -252,9 +259,10 @@ def local_template_version(args: argparse.Namespace) -> str:
     return selected
 
 
-def expected_hash(value: str) -> str:
+def expected_hash(value: str, archive_name: str) -> str:
     # Accept only our sidecar's conventional format, never arbitrary filenames or extra lines.
-    if not re.fullmatch(r"[0-9a-fA-F]{64}(?:  archetype\.zip)?\s*", value):
+    archive_name = validate_archive_name(archive_name)
+    if not re.fullmatch(r"[0-9a-fA-F]{64}(?:  " + re.escape(archive_name) + r")?\s*", value):
         raise ArchetypeError("Invalid SHA256 digest or sidecar.")
     return value[:64].lower()
 
@@ -262,16 +270,19 @@ def expected_hash(value: str) -> str:
 def archive_data(args: argparse.Namespace) -> tuple[bytes, str]:
     if args.archive:
         archive = Path(args.archive)
+        archive_name = validate_archive_name(archive.name)
         if archive.stat().st_size > MAX_ARCHIVE:
             raise ArchetypeError("Template archive exceeds the size limit.")
         data = archive.read_bytes()
         sidecar = archive.with_suffix(archive.suffix + ".sha256")
         if sidecar.stat().st_size > 256:
             raise ArchetypeError("Invalid SHA256 digest or sidecar.")
-        expected = expected_hash(sidecar.read_text(encoding="ascii"))
+        expected = expected_hash(sidecar.read_text(encoding="ascii"), archive_name)
     else:
         url = remote_url(args.nexus_url, args.template_version)
-        expected = expected_hash(download(url + ".sha256", 256).decode("ascii"))
+        expected = expected_hash(
+            download(url + ".sha256", 256).decode("ascii"), ARCHETYPE_ARCHIVE_NAME
+        )
         data = download(url, MAX_ARCHIVE)
     actual = digest(data)
     if actual != expected:
@@ -478,7 +489,7 @@ def generate(args: argparse.Namespace) -> Path:
     # destination() has already rejected workspace/project ancestors and symlinks.
     scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=target.parent))
     # Retain our scratch, including failure evidence; never remove a user's directory.
-    print(f"Scratch: {scratch}", file=sys.stderr)
+    print(messages.SCRATCH_CREATED.format(path=scratch), file=sys.stderr)
     template = scratch / "template"
     for name, content in entries.items():
         path = template / name
@@ -537,58 +548,52 @@ def generate(args: argparse.Namespace) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        epilog=(
-            "Validation always uses uv with network access allowed. "
-            "Git initialization and the initial main commit are required. "
-            "The template ZIP must have an accompanying .sha256 file."
-        ),
+        description=messages.CLI_DESCRIPTION,
+        epilog=messages.CLI_EPILOG,
     )
-    parser.add_argument("--name", help="Institutional name, e.g. gen_ai_demo or gen-agent-rrhh")
+    parser.add_argument("--name", help=messages.NAME_HELP)
     parser.add_argument(
         "--branch",
         default=None,
-        help="Work branch after the initial main commit; prompt when omitted (Enter: main)",
+        help=messages.BRANCH_HELP,
     )
-    parser.add_argument(
-        "--project-version", default="0.1.0", help="Independent service MAJOR.MINOR.PATCH"
-    )
+    parser.add_argument("--project-version", default="0.1.0", help=messages.PROJECT_VERSION_HELP)
     parser.add_argument(
         "--template-version",
         default=None,
-        help="Pinned MAJOR.MINOR.PATCH; omitted: discover/prompt latest published version",
+        help=messages.TEMPLATE_VERSION_HELP,
     )
     parser.add_argument(
         "--description",
         default=None,
-        help="Nonsecret description, preserved verbatim; prompt with generic default when omitted",
+        help=messages.DESCRIPTION_HELP,
     )
     parser.add_argument(
         "--output-dir",
         type=nonblank_path,
         default=Path.cwd(),
-        help="Existing non-project parent; default: the invocation directory",
+        help=messages.OUTPUT_DIR_HELP,
     )
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument(
         "--archive",
         type=Path,
-        help="Local ZIP with mandatory adjacent .sha256 file (otherwise download from Nexus)",
+        help=messages.ARCHIVE_HELP,
     )
     source_group.add_argument(
         "--nexus-url",
         default=environment_default("ARCHETYPE_NEXUS_URL", DEFAULT_NEXUS),
-        help=(
-            "Nexus Raw base; default: ARCHETYPE_NEXUS_URL or loopback Nexus; "
-            "requires ARCHETYPE_NEXUS_TEMPLATE_PATH; excludes --archive"
-        ),
+        help=messages.NEXUS_URL_HELP,
     )
     args = parser.parse_args(argv)
     try:
-        if not args.archive:
+        if args.archive:
+            validate_archive_name(args.archive.name)
+        else:
+            validate_archive_name(ARCHETYPE_ARCHIVE_NAME)
             nexus_template_path()
         if args.name is None:
-            args.name = input("Project name (e.g. gen_ai_demo): ").strip()
+            args.name = input(messages.PROJECT_NAME_PROMPT).strip()
         if args.template_version is None:
             available = (
                 [local_template_version(args)]
@@ -596,40 +601,38 @@ def main(argv: list[str] | None = None) -> int:
                 else published_versions(args.nexus_url)
             )
             latest = available[-1]
-            label = "Archive version" if args.archive else "Latest available archetype version"
-            print(f"{label}: {latest}")
-            args.template_version = input(f"Archetype version [{latest}]: ").strip() or latest
+            label = (
+                messages.LOCAL_TEMPLATE_VERSION
+                if args.archive
+                else messages.LATEST_TEMPLATE_VERSION
+            )
+            print(label.format(version=latest))
+            args.template_version = (
+                input(messages.TEMPLATE_VERSION_PROMPT.format(version=latest)).strip() or latest
+            )
             version(args.template_version)
             if args.template_version not in available:
-                raise ArchetypeError(
-                    "Selected archetype version is not available from this source."
-                )
+                raise ArchetypeError(messages.UNAVAILABLE_TEMPLATE_VERSION)
         if args.branch is None:
-            args.branch = input("Work branch [main]: ").strip() or "main"
+            args.branch = input(messages.WORK_BRANCH_PROMPT).strip() or "main"
         if args.description is None:
-            default_description = "Generated institutional Python service"
+            default_description = messages.DEFAULT_DESCRIPTION
             args.description = (
-                input(f"Description [{default_description}]: ") or default_description
+                input(messages.DESCRIPTION_PROMPT.format(description=default_description))
+                or default_description
             )
         target = generate(args)
     except ArchetypeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(messages.ERROR.format(message=exc), file=sys.stderr)
         return 2
     except (OSError, ValueError, EOFError, zipfile.BadZipFile, subprocess.SubprocessError):
-        print(
-            "Error: Generation failed; destination was not promoted. "
-            "Check inputs and local tooling.",
-            file=sys.stderr,
-        )
+        print(messages.GENERATION_FAILED, file=sys.stderr)
         return 2
     except Exception:
         # Cookiecutter exceptions can contain template values; never echo them.
-        print(
-            "Error: Template rendering or local validation failed; destination was not promoted.",
-            file=sys.stderr,
-        )
+        print(messages.RENDERING_FAILED, file=sys.stderr)
         return 2
-    print(f"Created {target.name}")
+    print(messages.PROJECT_CREATED.format(name=target.name))
     return 0
 
 

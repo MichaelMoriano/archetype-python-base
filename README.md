@@ -101,9 +101,25 @@ Para probar una plantilla local antes de publicarla:
 create-python-project --archive "C:\Plantillas\archetype.zip"
 ```
 
-Debe existir `C:\Plantillas\archetype.zip.sha256` o la ruta del archivo. El archivo acompañante es
+Para ese ejemplo debe existir `C:\Plantillas\archetype.zip.sha256` junto al ZIP. El archivo acompañante es
 obligatorio tanto localmente como en Nexus; no se admite un hash manual como
 alternativa. Un checksum ausente, inválido o que no coincide detiene la generación.
+
+El nombre remoto lo define el mantenedor mediante `ARCHETYPE_ARCHIVE_NAME` en
+`tools/archetype_cli/src/institutional_archetype_cli/support.py`; no es una variable
+de entorno. Su valor predeterminado es `archetype.zip`. Constructor, listado de
+versiones y descarga usan ese mismo nombre y su acompañante `<nombre>.sha256`.
+Cambiarlo requiere distribuir una CLI actualizada y publicar los archivos con el
+nombre acordado; las CLI anteriores siguen buscando el anterior.
+
+Con `--archive` se admite otro nombre local, como `archetype_python.zip` o
+`compilate.zip`, con su propio `.zip.sha256`. Se aceptan hasta 128 caracteres en
+total: el nombre debe empezar por letra o número ASCII, continuar con letras,
+números, `_` o `-` y terminar exactamente en `.zip`. No se admiten puntos dentro
+del nombre base, espacios, rutas en el nombre, URLs, controles ni nombres reservados
+de Windows como `CON.zip`. La carpeta que contiene el archivo sí puede tener
+espacios y se indica entre comillas. Un nombre inválido falla antes de leer el ZIP,
+escribir la salida o consultar Nexus.
 
 La ruta de plantilla debe usar segmentos separados por `/`, sin barras al inicio
 o al final. Solo se admiten letras ASCII, números, `.`, `_` y `-` dentro de cada
@@ -143,11 +159,11 @@ create-python-project
 Ejemplo interactivo, si `0.1.1` es la última plantilla publicada:
 
 ```text
-Project name (e.g. gen_ai_demo): gen_ai_demo
-Latest available archetype version: 0.1.1
-Archetype version [0.1.1]: 0.1.1
-Work branch [main]: feature/demo
-Description [Generated institutional Python service]: Demo service
+Project name (at least two lowercase words separated by '-' or '_', e.g. gen_ai_demo; creates folder 'gen-ai-demo' and package 'gen_ai_demo'): gen_ai_demo
+Latest published template version available in Nexus: 0.1.1
+Template version to use [0.1.1] (press Enter to accept, or enter another version available from this source): 0.1.1
+Working branch [main] (press Enter to stay on main, or enter a branch name to create after the initial commit, e.g. feature/my-service): feature/demo
+Service description [Generated institutional Python service] (briefly describe the service's purpose; do not include credentials or secrets): Demo service
 ```
 
 - Nombre: segmentos en minúsculas separados por `-` o `_`; al menos dos.
@@ -159,7 +175,7 @@ Description [Generated institutional Python service]: Demo service
 - Descripción: texto del servicio, sin secretos. La versión inicial del servicio
   es `0.1.0`, independiente de la CLI y de la plantilla.
 
-La CLI descarga `<ARCHETYPE_NEXUS_TEMPLATE_PATH>/<versión>/archetype.zip` y su `.sha256`, comprueba
+La CLI descarga `<ARCHETYPE_NEXUS_TEMPLATE_PATH>/<versión>/<nombre-zip-configurado>` y su `.sha256`, comprueba
 integridad, genera con Cookiecutter y ejecuta las validaciones locales antes del
 commit inicial. No ejecuta Sonar ni la auditoría online, no configura remotos ni
 publica. Si falla, detenerse y revisar el diagnóstico; no reutilizar una salida

@@ -96,6 +96,29 @@ Una ruta válida no demuestra que existan artefactos: eso se comprueba al consul
 el servidor. La misma ruta se usa para descubrir versiones y descargar ZIP/SHA-256.
 
 ---
+### Nombre del ZIP definido por el mantenedor
+
+`ARCHETYPE_ARCHIVE_NAME`, en
+`tools/archetype_cli/src/institutional_archetype_cli/support.py`, es la única
+constante para el nombre remoto del ZIP. El valor predeterminado es `archetype.zip`;
+los ejemplos de esta guía usan ese valor. No es una variable de entorno y no
+modifica la identidad `TEMPLATE_ID`, el directorio remoto ni la versión de la plantilla.
+
+Si se cambia a `archetype_python.zip`, el constructor produce ese nombre y
+`archetype_python.zip.sha256`; ambos se deben publicar juntos. Ajustar los ejemplos
+de carga/descarga y distribuir una CLI actualizada, porque el nombre se incorpora
+en la herramienta instalada. Las versiones publicadas con otro nombre no se
+descubren automáticamente con la nueva configuración.
+
+El constructor y la CLI comparten la validación: máximo 128 caracteres contando
+`.zip`, inicio con letra o número ASCII, seguido de letras, números, `_` o `-`,
+y extensión exacta `.zip`. Sin espacios, puntos internos, separadores, URLs,
+caracteres de control ni nombres reservados de Windows. La configuración inválida
+se rechaza antes de generar archivos o hacer peticiones a Nexus.
+El checksum puede contener solo el hash o el hash seguido de dos espacios y el
+nombre exacto esperado; se rechazan otros nombres. Para `--archive` se usa el nombre
+real del ZIP local, que debe cumplir el mismo estándar.
+
 ## 1. Abrir la raíz del proyecto
 
 Ubicarse en `archetype-python-service-archetype`, donde están `pyproject.toml`, `scripts/`,

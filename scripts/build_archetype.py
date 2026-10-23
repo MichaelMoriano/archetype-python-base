@@ -11,6 +11,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.archetype_support import (
+    ARCHETYPE_ARCHIVE_NAME,
     CONTEXT,
     GENERATOR_VERSION,
     PACKAGE_TOKEN,
@@ -20,6 +21,7 @@ from scripts.archetype_support import (
     digest,
     json_bytes,
     nonblank_path,
+    validate_archive_name,
     version,
 )
 
@@ -149,6 +151,7 @@ def template_text(path: str, text: str, source_version: str) -> str:
 
 
 def build(output: Path, template_version: str) -> Path:
+    archive_name = validate_archive_name(ARCHETYPE_ARCHIVE_NAME)
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     paths = [ROOT / name for name in FILES]
     for directory in DIRECTORIES:
@@ -175,15 +178,15 @@ def build(output: Path, template_version: str) -> Path:
     )
     output_directory = output / TEMPLATE_ID / template_version
     output_directory.mkdir(parents=True, exist_ok=True)
-    archive = output_directory / "archetype.zip"
+    archive = output_directory / archive_name
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
         for name, data in sorted(entries.items()):
             info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             handle.writestr(info, data)
-    archive.with_suffix(".zip.sha256").write_text(
-        f"{digest(archive.read_bytes())}  archetype.zip\n", encoding="ascii"
+    archive.with_name(f"{archive_name}.sha256").write_text(
+        f"{digest(archive.read_bytes())}  {archive_name}\n", encoding="ascii"
     )
     return archive
 
@@ -202,6 +205,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Artifact root; default: the repository dist directory",
     )
     args = parser.parse_args(argv)
+    try:
+        validate_archive_name(ARCHETYPE_ARCHIVE_NAME)
+    except ArchetypeError as error:
+        print(f"Error: ARCHETYPE_ARCHIVE_NAME: {error}", file=sys.stderr)
+        return 2
     try:
         source_version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
         template_version = (

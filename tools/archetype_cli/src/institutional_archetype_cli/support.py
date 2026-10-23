@@ -36,9 +36,28 @@ RESERVED = {
     *(f"lpt{i}" for i in range(1, 10)),
 }
 
+# The name of the archetype archive file.
+ARCHETYPE_ARCHIVE_NAME = "archetype.zip"
+
 
 class ArchetypeError(Exception):
     """A safe, nonsecret diagnostic suitable for console output."""
+
+
+def validate_archive_name(value: str) -> str:
+    """Accept a portable ZIP basename, never a path or a URL."""
+    if (
+        not isinstance(value, str)
+        or len(value) > 128
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*\.zip", value)
+        or value[:-4].lower() in RESERVED
+    ):
+        raise ArchetypeError(
+            "Invalid archive name: use at most 128 ASCII characters, starting with a letter "
+            "or digit, followed by letters, digits, underscores or hyphens and ending in .zip; "
+            "paths, URLs and reserved Windows names are not allowed."
+        )
+    return value
 
 
 def environment_default(name: str, fallback: str | None = None) -> str | None:
